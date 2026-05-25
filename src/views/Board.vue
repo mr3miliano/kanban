@@ -4,6 +4,7 @@
       <div class="flex items-center gap-6">
         <h1 class="text-2xl font-bold text-gray-800 tracking-tight">Software Kanban</h1>
         <button 
+          v-if="user && user.role === 'admin'"
           @click="openTaskModal()" 
           class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition-all shadow-md active:scale-95"
         >
@@ -54,14 +55,13 @@
 
         <draggable
           class="flex-1 overflow-y-auto min-h-[100px] space-y-3 p-1 custom-scrollbar"
-          :model-value="kanbanStore.getTasksByStatus(col.id)"
-          @update:model-value="(val) => handleSort(val, col.id)"
+          v-model="columnTasksMap[col.id].value"
           group="tasks"
-          @change="(e) => handleChange(e, col.id)"
           :move="checkMove"
           item-key="id"
           ghost-class="opacity-0"
           drag-class="rotate-2 shadow-2xl scale-105"
+          :data-status="col.id"
         >
           <template #item="{ element }">
             <TaskCard :task="element" @click="openTaskModal(element)" />
@@ -80,7 +80,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import draggable from 'vuedraggable';
 import { useAuth } from '../composables/useAuth';
 import { useRouter } from 'vue-router';
@@ -119,13 +119,16 @@ const isWipLimitReached = (column) => {
   return kanbanStore.getTasksByStatus(column.id).length >= column.wipLimit;
 };
 
-const handleSort = (newList, status) => {
-  // This is called when the list is reordered or an item is added/removed
-  // We only need to handle it if we want to persist the order within the column
-  // For now, the store's tasks array is the source of truth.
-  // When an item is moved between columns, handleChange handles it.
-  // If we want to support reordering, we'd need to update the store.tasks array.
-};
+// Crear un mapeo reactivo de cada columna a una propiedad computada escribible
+const columnTasksMap = {};
+for (const col of kanbanStore.columns) {
+  columnTasksMap[col.id] = computed({
+    get: () => kanbanStore.getTasksByStatus(col.id),
+    set: (newVal) => {
+      kanbanStore.updateColumnTasks(col.id, newVal, user.value);
+    }
+  });
+}
 
 /**
  * BUSINESS RULES
@@ -133,7 +136,7 @@ const handleSort = (newList, status) => {
 const checkMove = (evt) => {
   if (!user.value) return false;
   const task = evt.draggedContext.element;
-  const targetStatus = evt.to.parentElement.dataset.status;
+  const targetStatus = evt.to.dataset.status;
   const oldStatus = task.status;
   
   // Admin can move everything, but still respect WIP limits
@@ -144,6 +147,11 @@ const checkMove = (evt) => {
   // Dev can only move tasks assigned to them
   if (task.assignedTo && task.assignedTo.length > 0 && !task.assignedTo.includes(user.value.uid)) {
     return false;
+  }
+
+  // Si se mueve dentro de la misma columna (reordenamiento interno)
+  if (oldStatus === targetStatus) {
+    return true;
   }
 
   // Dev transition rules
@@ -157,23 +165,6 @@ const checkMove = (evt) => {
 
   // WIP Limit check
   return kanbanStore.canMoveTo(targetStatus, task.id);
-};
-
-const handleChange = (evt, newStatus) => {
-  if (!evt.added) return;
-
-  const task = evt.added.element;
-  const isDev = user.value.role === 'developer';
-
-  // Auto-assign if moving to in_progress
-  if (isDev && newStatus === 'in_progress' && (!task.assignedTo || task.assignedTo.length === 0)) {
-    kanbanStore.updateTask(task.id, {
-      assignedTo: [user.value.uid],
-      assignedNames: [user.value.name]
-    });
-  }
-
-  kanbanStore.moveTask(task.id, newStatus, user.value.uid);
 };
 </script>
 

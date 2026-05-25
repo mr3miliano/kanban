@@ -45,23 +45,26 @@ export const useKanbanStore = defineStore('kanban', () => {
     localStorage.setItem('kanban_columns', JSON.stringify(newColumns))
   }, { deep: true })
 
+  // Helper to check if task matches current filters
+  const matchesFilters = (task) => {
+    const matchesSearch = !filters.value.search || 
+                          task.title.toLowerCase().includes(filters.value.search.toLowerCase()) ||
+                          (task.description && task.description.toLowerCase().includes(filters.value.search.toLowerCase()))
+    
+    const matchesPriority = !filters.value.priority || task.priority === filters.value.priority
+    
+    const matchesAssigned = !filters.value.assignedTo || 
+                            (task.assignedTo && task.assignedTo.includes(filters.value.assignedTo))
+    
+    const matchesTags = !filters.value.tags || filters.value.tags.length === 0 || 
+                        (task.tags && filters.value.tags.every(tag => task.tags.includes(tag)))
+    
+    return matchesSearch && matchesPriority && matchesAssigned && matchesTags
+  }
+
   // Getters
   const filteredTasks = computed(() => {
-    return tasks.value.filter(task => {
-      const matchesSearch = !filters.value.search || 
-                            task.title.toLowerCase().includes(filters.value.search.toLowerCase()) ||
-                            task.description.toLowerCase().includes(filters.value.search.toLowerCase())
-      
-      const matchesPriority = !filters.value.priority || task.priority === filters.value.priority
-      
-      const matchesAssigned = !filters.value.assignedTo || 
-                              (task.assignedTo && task.assignedTo.includes(filters.value.assignedTo))
-      
-      const matchesTags = !filters.value.tags || filters.value.tags.length === 0 || 
-                          (task.tags && filters.value.tags.every(tag => task.tags.includes(tag)))
-      
-      return matchesSearch && matchesPriority && matchesAssigned && matchesTags
-    })
+    return tasks.value.filter(matchesFilters)
   })
 
   const getTasksByStatus = (status) => {
@@ -176,6 +179,55 @@ export const useKanbanStore = defineStore('kanban', () => {
     }
   }
 
+  const updateColumnTasks = (status, newTasks, currentUser = null) => {
+    // 1. Obtener todas las tareas de la columna actual en el store
+    const columnTasks = tasks.value.filter(t => t.status === status)
+    
+    // 2. Identificar qué tareas son visibles en el nuevo listado (newTasks)
+    const visibleIds = new Set(newTasks.map(t => t.id))
+    
+    // 3. Conservar las tareas de esta columna que NO están visibles y NO coinciden con los filtros (verdaderamente filtradas)
+    const hiddenTasks = columnTasks.filter(t => !visibleIds.has(t.id) && !matchesFilters(t))
+    
+    // 4. Procesar las nuevas tareas para actualizar su estado, añadir logs de actividad y auto-asignación si aplica
+    const processedNewTasks = newTasks.map(t => {
+      if (t.status !== status) {
+        const oldStatus = t.status
+        const updatedTask = {
+          ...t,
+          status,
+          updatedAt: new Date().toISOString()
+        }
+        
+        // Registrar la actividad de movimiento
+        if (!updatedTask.activity) updatedTask.activity = []
+        updatedTask.activity.unshift({
+          id: crypto.randomUUID(),
+          userId: currentUser?.uid || null,
+          type: 'move',
+          text: `Moved from ${oldStatus} to ${status}`,
+          createdAt: new Date().toISOString()
+        })
+        
+        // Regla de auto-asignación para desarrolladores cuando mueven a in_progress
+        if (currentUser?.role === 'developer' && status === 'in_progress' && (!updatedTask.assignedTo || updatedTask.assignedTo.length === 0)) {
+          updatedTask.assignedTo = [currentUser.uid]
+          updatedTask.assignedNames = [currentUser.name]
+        }
+        
+        return updatedTask
+      }
+      return t
+    })
+    
+    // 5. Obtener todas las tareas de OTRAS columnas, descartando aquellas que fueron movidas a esta columna
+    // (para evitar duplicados antes de que sus setters se ejecuten)
+    const otherColumnsTasks = tasks.value.filter(t => t.status !== status && !visibleIds.has(t.id))
+    
+    // 6. Actualizar el store de tareas reconstruyendo el array plano
+    tasks.value = [...otherColumnsTasks, ...hiddenTasks, ...processedNewTasks]
+  }
+
   return {
     tasks,
     columns,
@@ -187,6 +239,7 @@ export const useKanbanStore = defineStore('kanban', () => {
     updateTask,
     deleteTask,
     moveTask,
+    updateColumnTasks,
     addComment,
     addActivity
   }

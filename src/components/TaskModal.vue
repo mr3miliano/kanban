@@ -87,6 +87,12 @@ const handleClose = () => {
 const saveTask = () => {
   if (!form.value.title.trim()) return
 
+  // Regla de negocio: Solo el administrador puede crear tareas
+  if (isNewTask.value && user.value?.role !== 'admin') {
+    alert('Solo el administrador puede crear tareas.')
+    return
+  }
+
   const taskData = {
     ...form.value,
     creatorId: user.value?.uid,
