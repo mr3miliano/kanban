@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
+import { db, isFirebaseConfigured } from '../firebase'
+import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 
 export const useKanbanStore = defineStore('kanban', () => {
   const tasks = ref([])
@@ -17,28 +19,47 @@ export const useKanbanStore = defineStore('kanban', () => {
     tags: []
   })
 
-  // Persistence using Vercel KV with LocalStorage fallback
-  const fetchTasks = async () => {
-    try {
-      const response = await fetch('/api/tasks')
-      if (response.ok) {
-        const data = await response.json()
-        tasks.value = Array.isArray(data) ? data : []
-      } else {
-        throw new Error('Non-ok response from API')
-      }
-    } catch (e) {
-      console.warn('Failed to fetch tasks from Vercel KV. Using localStorage fallback:', e)
+  // Persistence using Firebase Firestore with LocalStorage fallback
+  let isUpdatingFromFirebase = false
+
+  const initFirebaseSync = () => {
+    if (!isFirebaseConfigured) {
+      // Fallback a localStorage si Firebase no está configurado
       const savedTasks = localStorage.getItem('kanban_tasks')
       if (savedTasks) {
         try {
           tasks.value = JSON.parse(savedTasks)
-        } catch (err) {
-          console.error('Failed to parse tasks from localStorage', err)
-          tasks.value = []
+        } catch (e) {
+          console.error('Failed to parse tasks from localStorage', e)
         }
       }
+      return
     }
+
+    // Escuchar cambios del documento en tiempo real
+    onSnapshot(doc(db, 'kanban', 'data'), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data()
+        
+        // Evitamos que al actualizar reactivamente el estado local
+        // se dispare el watcher que guarda en Firebase
+        isUpdatingFromFirebase = true
+        
+        if (data.tasks) {
+          tasks.value = data.tasks
+        }
+        if (data.columns) {
+          columns.value = data.columns
+        }
+        
+        isUpdatingFromFirebase = false
+      } else {
+        // Inicializar documento en Firestore si no existe
+        saveTasksToFirebase(tasks.value)
+      }
+    }, (error) => {
+      console.error('Error al sincronizar desde Firebase Firestore:', error)
+    })
   }
 
   const savedColumns = localStorage.getItem('kanban_columns')
@@ -51,37 +72,40 @@ export const useKanbanStore = defineStore('kanban', () => {
   }
 
   let saveTimeout = null
-  const saveTasksToApi = (newTasks) => {
+  const saveTasksToFirebase = (newTasks) => {
     // 1. Guardar en localStorage inmediatamente (local offline quick save)
     localStorage.setItem('kanban_tasks', JSON.stringify(newTasks))
 
-    // 2. Guardar asíncronamente en Vercel KV con debounce de 1s
+    // 2. Si Firebase no está configurado o el cambio viene de la suscripción, no hacemos nada más
+    if (!isFirebaseConfigured || isUpdatingFromFirebase) return
+
+    // 3. Guardar asíncronamente en Firebase Firestore con de-bounce de 1s
     if (saveTimeout) clearTimeout(saveTimeout)
     saveTimeout = setTimeout(async () => {
       try {
-        await fetch('/api/tasks', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(newTasks)
-        })
+        await setDoc(doc(db, 'kanban', 'data'), {
+          tasks: newTasks,
+          columns: columns.value
+        }, { merge: true })
       } catch (e) {
-        console.error('Failed to save tasks to Vercel KV:', e)
+        console.error('Failed to save tasks to Firebase Firestore:', e)
       }
     }, 1000)
   }
 
   watch(tasks, (newTasks) => {
-    saveTasksToApi(newTasks)
+    saveTasksToFirebase(newTasks)
   }, { deep: true })
 
   watch(columns, (newColumns) => {
     localStorage.setItem('kanban_columns', JSON.stringify(newColumns))
+    if (isFirebaseConfigured && !isUpdatingFromFirebase) {
+      saveTasksToFirebase(tasks.value)
+    }
   }, { deep: true })
 
-  // Carga inicial
-  fetchTasks()
+  // Carga inicial y suscripción a Firebase
+  initFirebaseSync()
 
   // Helper to check if task matches current filters
   const matchesFilters = (task) => {
@@ -280,6 +304,6 @@ export const useKanbanStore = defineStore('kanban', () => {
     updateColumnTasks,
     addComment,
     addActivity,
-    fetchTasks
+    initFirebaseSync
   }
 })
