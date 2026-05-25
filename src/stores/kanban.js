@@ -17,14 +17,27 @@ export const useKanbanStore = defineStore('kanban', () => {
     tags: []
   })
 
-  // Persistence
-  const savedTasks = localStorage.getItem('kanban_tasks')
-  if (savedTasks) {
+  // Persistence using Vercel KV with LocalStorage fallback
+  const fetchTasks = async () => {
     try {
-      tasks.value = JSON.parse(savedTasks)
+      const response = await fetch('/api/tasks')
+      if (response.ok) {
+        const data = await response.json()
+        tasks.value = Array.isArray(data) ? data : []
+      } else {
+        throw new Error('Non-ok response from API')
+      }
     } catch (e) {
-      console.error('Failed to parse tasks from localStorage', e)
-      tasks.value = []
+      console.warn('Failed to fetch tasks from Vercel KV. Using localStorage fallback:', e)
+      const savedTasks = localStorage.getItem('kanban_tasks')
+      if (savedTasks) {
+        try {
+          tasks.value = JSON.parse(savedTasks)
+        } catch (err) {
+          console.error('Failed to parse tasks from localStorage', err)
+          tasks.value = []
+        }
+      }
     }
   }
 
@@ -37,13 +50,38 @@ export const useKanbanStore = defineStore('kanban', () => {
     }
   }
 
-  watch(tasks, (newTasks) => {
+  let saveTimeout = null
+  const saveTasksToApi = (newTasks) => {
+    // 1. Guardar en localStorage inmediatamente (local offline quick save)
     localStorage.setItem('kanban_tasks', JSON.stringify(newTasks))
+
+    // 2. Guardar asíncronamente en Vercel KV con debounce de 1s
+    if (saveTimeout) clearTimeout(saveTimeout)
+    saveTimeout = setTimeout(async () => {
+      try {
+        await fetch('/api/tasks', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(newTasks)
+        })
+      } catch (e) {
+        console.error('Failed to save tasks to Vercel KV:', e)
+      }
+    }, 1000)
+  }
+
+  watch(tasks, (newTasks) => {
+    saveTasksToApi(newTasks)
   }, { deep: true })
 
   watch(columns, (newColumns) => {
     localStorage.setItem('kanban_columns', JSON.stringify(newColumns))
   }, { deep: true })
+
+  // Carga inicial
+  fetchTasks()
 
   // Helper to check if task matches current filters
   const matchesFilters = (task) => {
@@ -241,6 +279,7 @@ export const useKanbanStore = defineStore('kanban', () => {
     moveTask,
     updateColumnTasks,
     addComment,
-    addActivity
+    addActivity,
+    fetchTasks
   }
 })
